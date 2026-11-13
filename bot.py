@@ -62,6 +62,7 @@ EXTRA_NUMBERS = {"+888 0976 2134": 3000, "+888 0157 9623": 3000, "+888 0159 6427
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(HERE, "state.json")
+FONT_FILE = os.path.join(HERE, "DejaVuSans-Bold.ttf")
 CATS = {"u": "Юзернеймы", "n": "Номера +888", "g": "NFT-подарки"}
 ICON = {"u": "👤", "n": "📞", "g": "🎁"}
 ITEMS = {"u": [], "n": [], "g": []}
@@ -243,15 +244,24 @@ PALETTES = [((255, 94, 98), (255, 195, 113)), ((106, 17, 203), (37, 117, 252)),
             ((0, 198, 255), (0, 114, 255)), ((17, 153, 142), (56, 239, 125)),
             ((238, 9, 121), (255, 106, 0)), ((120, 75, 160), (43, 134, 197)),
             ((252, 70, 107), (63, 94, 251)), ((255, 175, 189), (255, 195, 160))]
-FONTS = ["DejaVuSans-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf", "Arial.ttf",
-         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-         "/System/Library/Fonts/Supplemental/Arial Bold.ttf"]
 _cache = {}
 
-def font(size):
-    for f in FONTS:
+def download_font():
+    """Скачивает шрифт с GitHub, если его нет на сервере."""
+    if not os.path.exists(FONT_FILE):
         try:
-            return ImageFont.truetype(f, size)
+            import urllib.request
+            url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Bold.ttf"
+            logging.info("Downloading font...")
+            urllib.request.urlretrieve(url, FONT_FILE)
+            logging.info("Font downloaded successfully.")
+        except Exception as e:
+            logging.error(f"Failed to download font: {e}")
+
+def font(size):
+    if os.path.exists(FONT_FILE):
+        try:
+            return ImageFont.truetype(FONT_FILE, size)
         except Exception:
             pass
     try:
@@ -376,8 +386,12 @@ async def show(ev, text, kb, photo=None, fallback=None):
     try:
         await msg.answer_photo(photo, caption=text, reply_markup=kb, parse_mode="HTML")
     except Exception:
+        # Если не удалось отправить фото (например, сбой Pillow), отправляем текст
         if fallback:
-            await msg.answer_photo(fallback(), caption=text, reply_markup=kb, parse_mode="HTML")
+            try:
+                await msg.answer_photo(fallback(), caption=text, reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                await msg.answer(text, reply_markup=kb, parse_mode="HTML")
         else:
             await msg.answer(text, reply_markup=kb, parse_mode="HTML")
     if is_cb:
@@ -753,7 +767,6 @@ _bot: Bot = None
 _dp: Dispatcher = None
 _loop: asyncio.AbstractEventLoop = None
 
-# ЖЕСТКО ЗАДАННЫЙ АДРЕС ДЛЯ ВЕБХУКА (без переменных окружения)
 WEBHOOK_URL = "https://app-1-9889.onrender.com"
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_SECRET = "mysecret123"
@@ -762,6 +775,9 @@ def init_bot_and_loop() -> None:
     global _bot, _dp, _loop
     if _bot is not None:
         return
+
+    # Скачиваем шрифт при старте
+    download_font()
 
     load_db()
     load_state()
