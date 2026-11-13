@@ -15,7 +15,6 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
                            InlineKeyboardButton as B, BufferedInputFile, Update)
 
 # ============ НАСТРОЙКИ ============
-# Токен и ID вписаны напрямую!
 BOT_TOKEN = "9224533616:AAE_ArqfdWu_gGoAhWMZ2iaa9Z07zTIm9-U"
 ADMIN_IDS = [8708165470, 8586156220]
 
@@ -725,7 +724,6 @@ async def orders_cmd(m: Message):
                    f"В аренде:\n{busy}\n\nПоследние:\n{last}")
 
 
-# === НОВОЕ: напоминания об окончании аренды, принимаем bot как аргумент ===
 async def expiry_loop(bot: Bot):
     while True:
         try:
@@ -755,13 +753,12 @@ _bot: Bot = None
 _dp: Dispatcher = None
 _loop: asyncio.AbstractEventLoop = None
 
+# ЖЕСТКО ЗАДАННЫЙ АДРЕС ДЛЯ ВЕБХУКА (без переменных окружения)
+WEBHOOK_URL = "https://app-1-9889.onrender.com"
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = "mysecret123"
 
-def init_bot_and_loop(webhook_url: str = "", webhook_path: str = "/webhook",
-                      webhook_secret: str = "") -> None:
-    """
-    Инициализация бота. Вызывается ОДИН раз из app.py.
-    Если webhook_url пустой — запускается polling (для локальной разработки).
-    """
+def init_bot_and_loop() -> None:
     global _bot, _dp, _loop
     if _bot is not None:
         return
@@ -777,27 +774,20 @@ def init_bot_and_loop(webhook_url: str = "", webhook_path: str = "/webhook",
     _dp.include_router(r)
     _loop.create_task(expiry_loop(_bot))
 
-    if webhook_url:
-        async def _set_webhook():
-            await _bot.set_webhook(
-                f"{webhook_url.rstrip('/')}{webhook_path}",
-                secret_token=webhook_secret or None,
-                drop_pending_updates=True,
-            )
-            logging.info("Webhook set to %s%s", webhook_url.rstrip('/'), webhook_path)
-        _loop.run_until_complete(_set_webhook())
-    else:
-        async def _poll():
-            await _bot.delete_webhook(drop_pending_updates=True)
-            logging.info("Running in POLLING mode (no WEBHOOK_URL)")
-            await _dp.start_polling(_bot)
-        _loop.create_task(_poll())
+    async def _set_webhook():
+        await _bot.set_webhook(
+            f"{WEBHOOK_URL}{WEBHOOK_PATH}",
+            secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=True,
+        )
+        logging.info("Webhook successfully set to %s%s", WEBHOOK_URL, WEBHOOK_PATH)
+    
+    _loop.run_until_complete(_set_webhook())
 
     threading.Thread(target=_loop.run_forever, daemon=True, name="aiogram-loop").start()
     logging.info("Bot initialized, event loop started")
 
 
 async def process_update(update_data: dict) -> None:
-    """Обработка одного апдейта из вебхука."""
     update = Update.model_validate(update_data, context={"bot": _bot})
     await _dp.feed_update(_bot, update)
