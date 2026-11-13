@@ -19,7 +19,6 @@ def health():
 
 @app.post("/webhook")
 def webhook():
-    # Проверка безопасности от Telegram
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != "mysecret123":
         return "", 403
         
@@ -27,11 +26,13 @@ def webhook():
     if not data:
         return "", 400
         
-    fut = asyncio.run_coroutine_threadsafe(bot_module.process_update(data), bot_module._loop)
     try:
+        fut = asyncio.run_coroutine_threadsafe(bot_module.process_update(data), bot_module._loop)
         fut.result(timeout=60)
-    except Exception:
-        logging.exception("process_update failed")
+    except Exception as e:
+        logging.error(f"Ошибка при обработке: {e}")
+        
+    # ВСЕГДА возвращаем 200, чтобы Telegram не зацикливал сообщение
     return "", 200
 
 if __name__ == "__main__":
