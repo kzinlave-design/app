@@ -1,18 +1,17 @@
 """
 Бот аренды Telegram-активов + покупка Telegram Premium за TON.
-Логика бота. Экспортирует init_bot_and_loop() для app.py (Flask).
+Логика бота БЕЗ ГЕНЕРАЦИИ КАРТИНОК (для экономии памяти).
 """
 import asyncio, os, io, json, time, secrets, random, zlib, threading, logging
 from urllib.parse import quote
 import aiohttp
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
-                           InlineKeyboardButton as B, BufferedInputFile, Update)
+                           InlineKeyboardButton as B, Update)
 
 # ============ НАСТРОЙКИ ============
 BOT_TOKEN = "9224533616:AAE_ArqfdWu_gGoAhWMZ2iaa9Z07zTIm9-U"
@@ -238,114 +237,6 @@ def find(cat, name):
     return next((i for i in ITEMS[cat] if i["name"] == name), None)
 
 
-# ============ КАРТИНКИ ============
-PALETTES = [((255, 94, 98), (255, 195, 113)), ((106, 17, 203), (37, 117, 252)),
-            ((0, 198, 255), (0, 114, 255)), ((17, 153, 142), (56, 239, 125)),
-            ((238, 9, 121), (255, 106, 0)), ((120, 75, 160), (43, 134, 197)),
-            ((252, 70, 107), (63, 94, 251)), ((255, 175, 189), (255, 195, 160))]
-_cache = {}
-
-# Убрали поиск файлов шрифтов, используем стандартный дефолтный
-def font(size):
-    try:
-        return ImageFont.load_default(size)
-    except TypeError:
-        return ImageFont.load_default()
-
-def ctext(d, cx, cy, text, fnt, fill):
-    l, t, r, b = d.textbbox((0, 0), text, font=fnt)
-    d.text((cx - (r - l) / 2 - l, cy - (b - t) / 2 - t), text, font=fnt, fill=fill)
-
-def fit(d, text, max_w, start):
-    s = start
-    while s > 10: # Уменьшили минимальный размер шрифта
-        f = font(s)
-        l, _, r, _ = d.textbbox((0, 0), text, font=f)
-        if r - l <= max_w:
-            return f
-        s -= 4
-    return font(10)
-
-def star(d, cx, cy, R, fill):
-    import math
-    pts = []
-    for i in range(10):
-        a = -math.pi / 2 + i * math.pi / 5
-        rr = R if i % 2 == 0 else R * 0.45
-        pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
-    d.polygon(pts, fill=fill)
-
-BLACK_PALETTE = ((0, 0, 0), (60, 60, 66))
-
-def make_card(title, line2, badge, seed, glyph, is_star=False, black=False):
-    W = H = 900
-    rnd = random.Random(seed)
-    c1, c2 = BLACK_PALETTE if black else PALETTES[rnd.randrange(len(PALETTES))]
-    img = Image.new("RGB", (W, H))
-    d = ImageDraw.Draw(img)
-    for y in range(H):
-        t = y / (H - 1)
-        d.line([(0, y), (W, y)], fill=tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3)))
-    img = img.convert("RGBA")
-    ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    od = ImageDraw.Draw(ov)
-    for _ in range(8):
-        rr = rnd.randint(90, 280)
-        x, y = rnd.randint(-60, W), rnd.randint(-60, H)
-        od.ellipse([x - rr, y - rr, x + rr, y + rr], fill=(255, 255, 255, rnd.randint(16, 42)))
-    img = Image.alpha_composite(img, ov.filter(ImageFilter.GaussianBlur(8)))
-    glass = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(glass).rounded_rectangle([60, 60, W - 60, H - 60], radius=64,
-                                            fill=(255, 255, 255, 38), outline=(255, 255, 255, 140), width=3)
-    img = Image.alpha_composite(img, glass)
-    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(shadow).ellipse([W // 2 - 150, 205, W // 2 + 150, 525], fill=(0, 0, 0, 70))
-    img = Image.alpha_composite(img, shadow.filter(ImageFilter.GaussianBlur(18)))
-    d = ImageDraw.Draw(img)
-    cx, cy = W // 2, 340
-    d.ellipse([cx - 150, cy - 150, cx + 150, cy + 150], fill=(255, 255, 255, 245))
-    d.ellipse([cx - 128, cy - 128, cx + 128, cy + 128], outline=c1 + (255,), width=6)
-    if is_star:
-        star(d, cx, cy + 6, 105, c2 + (255,))
-    else:
-        ctext(d, cx, cy, glyph, fit(d, glyph, 220, 150), c2 + (255,))
-    ctext(d, cx, 600, title, fit(d, title, W - 190, 78), (255, 255, 255, 255))
-    if line2:
-        ctext(d, cx, 680, line2, font(44), (255, 255, 255, 230))
-    bw = 330
-    d.rounded_rectangle([cx - bw // 2, 740, cx + bw // 2, 815], radius=38, fill=(255, 255, 255, 235))
-    ctext(d, cx, 778, badge, font(36), c2 + (255,))
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, "JPEG", quality=92)
-    return buf.getvalue()
-
-def cached(key, fn):
-    if key not in _cache:
-        _cache[key] = fn()
-    return _cache[key]
-
-def photo_file(key, fn):
-    return BufferedInputFile(cached(key, fn), filename="card.jpg")
-
-def img_main():   return photo_file("main", lambda: make_card("Galaxy Rent", "Аренда • Premium", "TON", 7, "R"))
-def img_cat(cat):
-    g = {"u": "@", "n": "+888", "g": "G"}[cat]
-    return photo_file("cat" + cat, lambda: make_card(CATS[cat], f"{len(ITEMS[cat])} лотов", "КАТАЛОГ", ord(cat), g))
-def img_item(cat, it):
-    g = {"u": "@", "n": "888", "g": it["name"][:1]}[cat]
-    sub = f"{fmt(day_price(it))} TON / сутки"
-    return photo_file("it" + it["name"], lambda: make_card(it["name"], sub, "АРЕНДА",
-                                                           zlib.crc32(it["name"].encode()) % 997, g,
-                                                           black=it.get("black", False)))
-def img_premium(m=None):
-    t = "Telegram Premium"
-    sub = f"{m} мес. — {fmt(prem_price(m))} TON" if m else "3 • 6 • 12 месяцев"
-    return photo_file(f"pm{m}", lambda: make_card(t, sub, "PREMIUM", 11 + (m or 0), "", True))
-def img_stars(n=None):
-    sub = f"{n} ⭐ — {fmt(stars_price(n))} TON" if n else "50 • 100 • 250 • 500 • 1000"
-    return photo_file(f"st{n}", lambda: make_card("Telegram Stars", sub, "STARS", 23 + (n or 0), "", True))
-
-
 # ============ UI ============
 class S(StatesGroup):
     search = State()
@@ -354,33 +245,17 @@ class S(StatesGroup):
 
 r = Router()
 
-async def show(ev, text, kb, photo=None, fallback=None):
+async def show(ev, text, kb):
     msg = ev.message if isinstance(ev, CallbackQuery) else ev
     is_cb = isinstance(ev, CallbackQuery)
-    if photo is None:
-        if is_cb and msg.photo:
-            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
-            await msg.delete()
-        elif is_cb:
-            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        else:
-            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
-        return
-    try:
-        await msg.answer_photo(photo, caption=text, reply_markup=kb, parse_mode="HTML")
-    except Exception:
-        if fallback:
-            try:
-                await msg.answer_photo(fallback(), caption=text, reply_markup=kb, parse_mode="HTML")
-            except Exception:
-                await msg.answer(text, reply_markup=kb, parse_mode="HTML")
-        else:
-            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+    
     if is_cb:
         try:
-            await msg.delete()
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
         except Exception:
-            pass
+            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -398,12 +273,12 @@ MAIN_TEXT = "<b>Galaxy Rent</b>\nАренда юзернеймов, номеро
 @r.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
-    await show(m, MAIN_TEXT, main_kb(), img_main(), lambda: img_main())
+    await show(m, MAIN_TEXT, main_kb())
 
 @r.callback_query(F.data == "home")
 async def home(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    await show(c, MAIN_TEXT, main_kb(), img_main())
+    await show(c, MAIN_TEXT, main_kb())
 
 @r.callback_query(F.data == "terms")
 async def terms(c: CallbackQuery):
@@ -414,7 +289,7 @@ async def rent(c: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [B(text=f"{ICON[k]} {CATS[k]} ({len(ITEMS[k])})", callback_data=f"p:{k}:0")] for k in CATS
     ] + [[B(text="⬅️ Назад", callback_data="home")]])
-    await show(c, "<b>Выберите категорию</b>", kb, img_main())
+    await show(c, "<b>Выберите категорию</b>", kb)
 
 def items_kb(pairs, page, nav_prefix, back="rent"):
     chunk = pairs[page * PAGE:(page + 1) * PAGE]
@@ -441,7 +316,7 @@ async def noop(c: CallbackQuery):
 async def list_items(c: CallbackQuery):
     _, cat, page = c.data.split(":")
     pairs = [(cat, it) for it in ITEMS[cat]]
-    await show(c, f"<b>{CATS[cat]}</b>\nВыберите лот:", items_kb(pairs, int(page), f"p:{cat}"), img_cat(cat))
+    await show(c, f"<b>{CATS[cat]}</b>\nВыберите лот:", items_kb(pairs, int(page), f"p:{cat}"))
 
 @r.callback_query(F.data == "search")
 async def search(c: CallbackQuery, state: FSMContext):
@@ -482,8 +357,7 @@ async def item(c: CallbackQuery, state: FSMContext):
                    f"\nЦвет: <b>{it.get('color') or '—'}</b>")
     text = (f"{ICON[cat]} <b>{it['name']}</b>{link}{details}\n"
             f"{price_line(it)}\n\nНа сколько вы хотите арендовать?")
-    await show(c, text, InlineKeyboardMarkup(inline_keyboard=rows),
-               it.get("img") or img_item(cat, it), lambda: img_item(cat, it))
+    await show(c, text, InlineKeyboardMarkup(inline_keyboard=rows))
 
 @r.callback_query(F.data == "dcustom")
 async def dcustom(c: CallbackQuery, state: FSMContext):
@@ -522,7 +396,7 @@ async def prem(c: CallbackQuery):
     rows = [[B(text=f"⭐ {m} мес. — {fmt(prem_price(m))} TON", callback_data=f"pm:{m}")] for m in PREMIUM_BASE]
     rows.append([B(text="⬅️ Назад", callback_data="home")])
     await show(c, "<b>Telegram Premium</b>\nОплата в TON. Подписка отправляется на ваш @username "
-                  "(как подарок через Fragment).", InlineKeyboardMarkup(inline_keyboard=rows), img_premium())
+                  "(как подарок через Fragment).", InlineKeyboardMarkup(inline_keyboard=rows))
 
 @r.callback_query(F.data.startswith("pm:"))
 async def prem_months(c: CallbackQuery, state: FSMContext):
@@ -534,14 +408,14 @@ async def prem_months(c: CallbackQuery, state: FSMContext):
     rows.append([B(text="⬅️ Назад", callback_data="prem")])
     await state.set_state(S.target)
     await show(c, f"<b>Premium {m} мес.</b> — {fmt(prem_price(m))} TON\n\nНапишите @username получателя "
-                  "или нажмите кнопку.", InlineKeyboardMarkup(inline_keyboard=rows), img_premium(m))
+                  "или нажмите кнопку.", InlineKeyboardMarkup(inline_keyboard=rows))
 
 @r.callback_query(F.data == "stars")
 async def stars(c: CallbackQuery):
     rows = [[B(text=f"🌟 {n} ⭐ — {fmt(stars_price(n))} TON", callback_data=f"sn:{n}")] for n in STARS_BASE]
     rows.append([B(text="⬅️ Назад", callback_data="home")])
     await show(c, "<b>Telegram Stars</b>\nОплата в TON. Звёзды отправляются на ваш @username.",
-               InlineKeyboardMarkup(inline_keyboard=rows), img_stars())
+               InlineKeyboardMarkup(inline_keyboard=rows))
 
 @r.callback_query(F.data.startswith("sn:"))
 async def stars_amount(c: CallbackQuery, state: FSMContext):
@@ -553,7 +427,7 @@ async def stars_amount(c: CallbackQuery, state: FSMContext):
     rows.append([B(text="⬅️ Назад", callback_data="stars")])
     await state.set_state(S.target)
     await show(c, f"<b>{n} ⭐</b> — {fmt(stars_price(n))} TON\n\nНапишите @username получателя "
-                  "или нажмите кнопку.", InlineKeyboardMarkup(inline_keyboard=rows), img_stars(n))
+                  "или нажмите кнопку.", InlineKeyboardMarkup(inline_keyboard=rows))
 
 async def prem_confirm(ev, state, target):
     d = await state.get_data()
