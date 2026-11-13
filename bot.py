@@ -62,7 +62,6 @@ EXTRA_NUMBERS = {"+888 0976 2134": 3000, "+888 0157 9623": 3000, "+888 0159 6427
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(HERE, "state.json")
-FONT_FILE = os.path.join(HERE, "DejaVuSans-Bold.ttf")
 CATS = {"u": "Юзернеймы", "n": "Номера +888", "g": "NFT-подарки"}
 ICON = {"u": "👤", "n": "📞", "g": "🎁"}
 ITEMS = {"u": [], "n": [], "g": []}
@@ -246,24 +245,8 @@ PALETTES = [((255, 94, 98), (255, 195, 113)), ((106, 17, 203), (37, 117, 252)),
             ((252, 70, 107), (63, 94, 251)), ((255, 175, 189), (255, 195, 160))]
 _cache = {}
 
-def download_font():
-    """Скачивает шрифт с GitHub, если его нет на сервере."""
-    if not os.path.exists(FONT_FILE):
-        try:
-            import urllib.request
-            url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Bold.ttf"
-            logging.info("Downloading font...")
-            urllib.request.urlretrieve(url, FONT_FILE)
-            logging.info("Font downloaded successfully.")
-        except Exception as e:
-            logging.error(f"Failed to download font: {e}")
-
+# Убрали поиск файлов шрифтов, используем стандартный дефолтный
 def font(size):
-    if os.path.exists(FONT_FILE):
-        try:
-            return ImageFont.truetype(FONT_FILE, size)
-        except Exception:
-            pass
     try:
         return ImageFont.load_default(size)
     except TypeError:
@@ -275,13 +258,13 @@ def ctext(d, cx, cy, text, fnt, fill):
 
 def fit(d, text, max_w, start):
     s = start
-    while s > 28:
+    while s > 10: # Уменьшили минимальный размер шрифта
         f = font(s)
         l, _, r, _ = d.textbbox((0, 0), text, font=f)
         if r - l <= max_w:
             return f
         s -= 4
-    return font(28)
+    return font(10)
 
 def star(d, cx, cy, R, fill):
     import math
@@ -386,7 +369,6 @@ async def show(ev, text, kb, photo=None, fallback=None):
     try:
         await msg.answer_photo(photo, caption=text, reply_markup=kb, parse_mode="HTML")
     except Exception:
-        # Если не удалось отправить фото (например, сбой Pillow), отправляем текст
         if fallback:
             try:
                 await msg.answer_photo(fallback(), caption=text, reply_markup=kb, parse_mode="HTML")
@@ -775,9 +757,6 @@ def init_bot_and_loop() -> None:
     global _bot, _dp, _loop
     if _bot is not None:
         return
-
-    # Скачиваем шрифт при старте
-    download_font()
 
     load_db()
     load_state()
