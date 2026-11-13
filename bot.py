@@ -1,48 +1,55 @@
 """
 Бот аренды Telegram-активов + покупка Telegram Premium за TON.
-Логика бота БЕЗ ГЕНЕРАЦИИ КАРТИНОК (для экономии памяти).
+pip install aiogram aiohttp pillow
+Запуск: python rent_bot.py   (rentdb.txt лежит рядом)
 """
-import asyncio, os, io, json, time, secrets, random, zlib, threading, logging
+import asyncio, os, io, json, time, secrets, random, zlib
 from urllib.parse import quote
 import aiohttp
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
-                           InlineKeyboardButton as B, Update)
+                           InlineKeyboardButton as B, BufferedInputFile)
 
 # ============ НАСТРОЙКИ ============
-BOT_TOKEN = "9224533616:AAE_ArqfdWu_gGoAhWMZ2iaa9Z07zTIm9-U"
-ADMIN_IDS = [8708165470, 8586156220]
-
-WALLET    = "UQCEI8wLYKGYmARvvyWKc_QGhYu5nVbT3UrqipjVGrZxVCdQ"
-DAY_RATE = 0.08
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9224533616:AAE_ArqfdWu_gGoAhWMZ2iaa9Z07zTIm9-U")
+ADMIN_IDS = [8708165470, 8586156220]   # админы: получают заказы и управляют ботом
+WALLET = "UQCEI8wLYKGYmARvvyWKc_QGhYu5nVbT3UrqipjVGrZxVCdQ"
+DAY_RATE = 0.08                # 5 TON -> 0.4 TON/сутки
 MIN_DAY_PRICE = 0.1
-NUMBER_TIERS = {1: 6.0, 7: 20.0, 30: 50.0, 365: 400.0}
-PRICE_OFFSETS = [0.0, 0.3, 0.7, 1.1, 1.4, 1.8]
-NUMBER_DAY_OVERRIDE = {}
-BEAUTY_BONUS = {1: 2.0, 2: 3.0}
+NUMBER_TIERS = {1: 6.0, 7: 20.0, 30: 50.0, 365: 400.0}   # номера +888: дней -> TON
+PRICE_OFFSETS = [0.0, 0.3, 0.7, 1.1, 1.4, 1.8]   # добавка к цене дня: группы по 2–5 номеров с одной ценой
+NUMBER_DAY_OVERRIDE = {}   # ручная цена дня для номера, например {"+888 0976 2134": 7.4}
+BEAUTY_BONUS = {1: 2.0, 2: 3.0}   # надбавка за красивый номер (TON к каждому тарифу)
 PAGE = 8
 DAY_OPTIONS = [1, 3, 7, 14, 30]
 
+# Цены Premium на Fragment (TON) — ПРИМЕРНЫЕ, курс плавает. Сверьте на fragment.com/premium
 PREMIUM_BASE = {3: 10.0, 6: 17.0, 12: 28.0}
-PREMIUM_MARKUP = 1.05
+PREMIUM_MARKUP = 1.05          # ваша наценка (1.05 = +5%)
 
+# Telegram Stars: количество звёзд -> цена в TON (ПРИМЕРНЫЕ, сверьте курс перед продажей)
 STARS_BASE = {50: 1.0, 100: 1.9, 250: 4.5, 500: 8.5, 1000: 16.0}
 STARS_MARKUP = 1.05
 
+# Своё описание перевода в Tonkeeper (комментарий). Код заказа добавляется после него.
 TRANSFER_DESC = "Оплата заказа"
 
+# Фоны (чёрные) для аренды
 EXTRA_BACKGROUNDS = {f"Black Fon {i:02d}": p for i, p in
                      zip(range(1, 9), [4.0, 4.0, 5.0, 5.0, 6.0, 6.0, 8.0, 10.0])}
 
+# Дополнительные NFT-подарки (без номера, без ссылки). Цены ПРИМЕРНЫЕ — поменяйте под рынок.
 EXTRA_GIFTS = {
     "Homemade Cake": 3.0, "Jelly Bunny": 2.0, "Spiced Wine": 3.0, "Santa Hat": 2.0,
     "Candy Cane": 2.0, "Cookie Heart": 2.5, "B-Day Candle": 2.0, "Desk Calendar": 3.0,
     "Fresh Socks": 2.5, "Tama Gadget": 2.0,
 }
+# ID и цвет для дополнительных подарков и фонов: название -> (ID, цвет). У каждого свой цвет.
 GIFT_INFO = {
     "Homemade Cake": (1001, "Розовый"), "Jelly Bunny": (1002, "Зелёный"),
     "Spiced Wine": (1003, "Бордовый"), "Santa Hat": (1004, "Красный"),
@@ -64,8 +71,8 @@ STATE_FILE = os.path.join(HERE, "state.json")
 CATS = {"u": "Юзернеймы", "n": "Номера +888", "g": "NFT-подарки"}
 ICON = {"u": "👤", "n": "📞", "g": "🎁"}
 ITEMS = {"u": [], "n": [], "g": []}
-RENTED = {}
-ORDERS = {}
+RENTED = {}     # имя лота -> {"until", "order", "notified"}
+ORDERS = {}     # id -> заказ
 
 TERMS = (
     "<b>Условия аренды</b>\n\n"
@@ -79,9 +86,6 @@ TERMS = (
 
 # ============ БАЗА ============
 def load_db(path=os.path.join(HERE, "rentdb.txt")):
-    if not os.path.exists(path):
-        logging.warning("rentdb.txt not found at %s", path)
-        return
     sec = None
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -129,11 +133,8 @@ def load_db(path=os.path.join(HERE, "rentdb.txt")):
 
 
 def save_state():
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"orders": ORDERS, "rented": RENTED}, f, ensure_ascii=False)
-    except Exception:
-        logging.exception("save_state failed")
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"orders": ORDERS, "rented": RENTED}, f, ensure_ascii=False)
 
 
 def load_state():
@@ -143,10 +144,11 @@ def load_state():
             ORDERS.update(d.get("orders", {}))
             RENTED.update(d.get("rented", {}))
         except Exception:
-            logging.exception("load_state failed")
+            pass
 
 
 def beauty_level(num):
+    """0 — обычный, 1 — симпатичный, 2 — очень красивый (по цифрам после +888)."""
     d = "".join(ch for ch in num if ch.isdigit())[3:]
     if len(d) < 4:
         return 0
@@ -176,12 +178,13 @@ def number_data(num):
 
 
 def apply_number_prices():
+    """Делит номера на группы по 2–5 штук; у группы одна цена. Остальные тарифы масштабируются."""
     nums = sorted(ITEMS["n"], key=lambda x: x["name"])
     rnd = random.Random(2026)
     i, prev, used = 0, None, {}
     while i < len(nums):
         size = rnd.randint(2, 5)
-        if len(nums) - i - size == 1:
+        if len(nums) - i - size == 1:      # не оставляем одиночку
             size = size - 1 if size > 2 else size + 1
         ok = [o for o in PRICE_OFFSETS if o != prev and used.get(o, 0) + size <= 5]
         off = rnd.choice(ok) if ok else min((o for o in PRICE_OFFSETS if o != prev), key=lambda o: used.get(o, 0))
@@ -192,12 +195,13 @@ def apply_number_prices():
             k = day / NUMBER_TIERS[1]
             bonus = BEAUTY_BONUS.get(it.get("beauty", 0), 0.0)
             t = {d: round(p * k, 1) for d, p in NUMBER_TIERS.items()}
-            t[365] = round(NUMBER_TIERS[365] + (day - NUMBER_TIERS[1]) * 5, 1)
+            t[365] = round(NUMBER_TIERS[365] + (day - NUMBER_TIERS[1]) * 5, 1)   # год почти не дорожает
             it["tiers"] = {d: round(p + bonus, 1) for d, p in t.items()}
         i += size
 
 
 def num_cost(tiers, days):
+    """Минимальная цена за days дней из пакетов (день/неделя/месяц/год)."""
     INF = float("inf")
     dp = [0.0] + [INF] * days
     for i in range(1, days + 1):
@@ -218,8 +222,12 @@ def rent_total(it, days):
     return round(day_price(it) * days, 2)
 
 
-def prem_price(m):    return round(PREMIUM_BASE[m] * PREMIUM_MARKUP, 2)
-def stars_price(n):   return round(STARS_BASE[n] * STARS_MARKUP, 2)
+def prem_price(m):
+    return round(PREMIUM_BASE[m] * PREMIUM_MARKUP, 2)
+
+
+def stars_price(n):
+    return round(STARS_BASE[n] * STARS_MARKUP, 2)
 
 
 def price_line(it):
@@ -231,10 +239,150 @@ def price_line(it):
     return f"Цена: <b>{fmt(day_price(it))} TON</b>/сутки"
 
 
-def fmt(x):        return f"{x:.2f}".rstrip("0").rstrip(".")
-def is_busy(name): return name in RENTED
+def fmt(x):
+    return f"{x:.2f}".rstrip("0").rstrip(".")
+
+
+def is_busy(name):
+    return name in RENTED
+
+
 def find(cat, name):
     return next((i for i in ITEMS[cat] if i["name"] == name), None)
+
+
+# ============ КАРТИНКИ ============
+PALETTES = [((255, 94, 98), (255, 195, 113)), ((106, 17, 203), (37, 117, 252)),
+            ((0, 198, 255), (0, 114, 255)), ((17, 153, 142), (56, 239, 125)),
+            ((238, 9, 121), (255, 106, 0)), ((120, 75, 160), (43, 134, 197)),
+            ((252, 70, 107), (63, 94, 251)), ((255, 175, 189), (255, 195, 160))]
+FONTS = ["DejaVuSans-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf", "Arial.ttf",
+         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+         "/System/Library/Fonts/Supplemental/Arial Bold.ttf"]
+_cache = {}
+
+
+def font(size):
+    for f in FONTS:
+        try:
+            return ImageFont.truetype(f, size)
+        except Exception:
+            pass
+    try:
+        return ImageFont.load_default(size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def ctext(d, cx, cy, text, fnt, fill):
+    l, t, r, b = d.textbbox((0, 0), text, font=fnt)
+    d.text((cx - (r - l) / 2 - l, cy - (b - t) / 2 - t), text, font=fnt, fill=fill)
+
+
+def fit(d, text, max_w, start):
+    s = start
+    while s > 28:
+        f = font(s)
+        l, _, r, _ = d.textbbox((0, 0), text, font=f)
+        if r - l <= max_w:
+            return f
+        s -= 4
+    return font(28)
+
+
+def star(d, cx, cy, R, fill):
+    import math
+    pts = []
+    for i in range(10):
+        a = -math.pi / 2 + i * math.pi / 5
+        r = R if i % 2 == 0 else R * 0.45
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    d.polygon(pts, fill=fill)
+
+
+BLACK_PALETTE = ((0, 0, 0), (60, 60, 66))
+
+
+def make_card(title, line2, badge, seed, glyph, is_star=False, black=False):
+    W = H = 900
+    rnd = random.Random(seed)
+    c1, c2 = BLACK_PALETTE if black else PALETTES[rnd.randrange(len(PALETTES))]
+    img = Image.new("RGB", (W, H))
+    d = ImageDraw.Draw(img)
+    for y in range(H):
+        t = y / (H - 1)
+        d.line([(0, y), (W, y)], fill=tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3)))
+    img = img.convert("RGBA")
+    ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    od = ImageDraw.Draw(ov)
+    for _ in range(8):
+        r = rnd.randint(90, 280)
+        x, y = rnd.randint(-60, W), rnd.randint(-60, H)
+        od.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255, rnd.randint(16, 42)))
+    img = Image.alpha_composite(img, ov.filter(ImageFilter.GaussianBlur(8)))
+    glass = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(glass).rounded_rectangle([60, 60, W - 60, H - 60], radius=64,
+                                            fill=(255, 255, 255, 38), outline=(255, 255, 255, 140), width=3)
+    img = Image.alpha_composite(img, glass)
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).ellipse([W // 2 - 150, 205, W // 2 + 150, 525], fill=(0, 0, 0, 70))
+    img = Image.alpha_composite(img, shadow.filter(ImageFilter.GaussianBlur(18)))
+    d = ImageDraw.Draw(img)
+    cx, cy = W // 2, 340
+    d.ellipse([cx - 150, cy - 150, cx + 150, cy + 150], fill=(255, 255, 255, 245))
+    d.ellipse([cx - 128, cy - 128, cx + 128, cy + 128], outline=c1 + (255,), width=6)
+    if is_star:
+        star(d, cx, cy + 6, 105, c2 + (255,))
+    else:
+        ctext(d, cx, cy, glyph, fit(d, glyph, 220, 150), c2 + (255,))
+    ctext(d, cx, 600, title, fit(d, title, W - 190, 78), (255, 255, 255, 255))
+    if line2:
+        ctext(d, cx, 680, line2, font(44), (255, 255, 255, 230))
+    bw = 330
+    d.rounded_rectangle([cx - bw // 2, 740, cx + bw // 2, 815], radius=38, fill=(255, 255, 255, 235))
+    ctext(d, cx, 778, badge, font(36), c2 + (255,))
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=92)
+    return buf.getvalue()
+
+
+def cached(key, fn):
+    if key not in _cache:
+        _cache[key] = fn()
+    return _cache[key]
+
+
+def photo_file(key, fn):
+    return BufferedInputFile(cached(key, fn), filename="card.jpg")
+
+
+def img_main():
+    return photo_file("main", lambda: make_card("Galaxy Rent", "Аренда • Premium", "TON", 7, "R"))
+
+
+def img_cat(cat):
+    g = {"u": "@", "n": "+888", "g": "G"}[cat]
+    return photo_file("cat" + cat, lambda: make_card(CATS[cat], f"{len(ITEMS[cat])} лотов", "КАТАЛОГ",
+                                                     ord(cat), g))
+
+
+def img_item(cat, it):
+    g = {"u": "@", "n": "888", "g": it["name"][:1]}[cat]
+    sub = f"{fmt(day_price(it))} TON / сутки"
+    return photo_file("it" + it["name"], lambda: make_card(it["name"], sub, "АРЕНДА",
+                                                           zlib.crc32(it["name"].encode()) % 997, g,
+                                                           black=it.get("black", False)))
+
+
+def img_premium(m=None):
+    t = "Telegram Premium"
+    sub = f"{m} мес. — {fmt(prem_price(m))} TON" if m else "3 • 6 • 12 месяцев"
+    return photo_file(f"pm{m}", lambda: make_card(t, sub, "PREMIUM", 11 + (m or 0), "", True))
+
+
+def img_stars(n=None):
+    sub = f"{n} ⭐ — {fmt(stars_price(n))} TON" if n else "50 • 100 • 250 • 500 • 1000"
+    return photo_file(f"st{n}", lambda: make_card("Telegram Stars", sub, "STARS", 23 + (n or 0), "", True))
 
 
 # ============ UI ============
@@ -243,19 +391,35 @@ class S(StatesGroup):
     days = State()
     target = State()
 
+
 r = Router()
 
-async def show(ev, text, kb):
+
+async def show(ev, text, kb, photo=None, fallback=None):
     msg = ev.message if isinstance(ev, CallbackQuery) else ev
     is_cb = isinstance(ev, CallbackQuery)
-    
+    if photo is None:
+        if is_cb and msg.photo:
+            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+            await msg.delete()
+        elif is_cb:
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        else:
+            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+        return
+    try:
+        await msg.answer_photo(photo, caption=text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        if fallback:
+            await msg.answer_photo(fallback(), caption=text, reply_markup=kb, parse_mode="HTML")
+        else:
+            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
     if is_cb:
         try:
-            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await msg.delete()
         except Exception:
-            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+            pass
+
 
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -265,31 +429,38 @@ def main_kb():
         [B(text="🔍 Поиск", callback_data="search"), B(text="📦 Мои заказы", callback_data="my")],
         [B(text="ℹ️ Условия", callback_data="terms")]])
 
+
 def back_home():
     return InlineKeyboardMarkup(inline_keyboard=[[B(text="⬅️ В меню", callback_data="home")]])
 
+
 MAIN_TEXT = "<b>Galaxy Rent</b>\nАренда юзернеймов, номеров +888, NFT-подарков и покупка Telegram Premium за TON."
+
 
 @r.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
-    await show(m, MAIN_TEXT, main_kb())
+    await show(m, MAIN_TEXT, main_kb(), img_main(), lambda: img_main())
+
 
 @r.callback_query(F.data == "home")
 async def home(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    await show(c, MAIN_TEXT, main_kb())
+    await show(c, MAIN_TEXT, main_kb(), img_main())
+
 
 @r.callback_query(F.data == "terms")
 async def terms(c: CallbackQuery):
     await show(c, TERMS, back_home())
+
 
 @r.callback_query(F.data == "rent")
 async def rent(c: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [B(text=f"{ICON[k]} {CATS[k]} ({len(ITEMS[k])})", callback_data=f"p:{k}:0")] for k in CATS
     ] + [[B(text="⬅️ Назад", callback_data="home")]])
-    await show(c, "<b>Выберите категорию</b>", kb)
+    await show(c, "<b>Выберите категорию</b>", kb, img_main())
+
 
 def items_kb(pairs, page, nav_prefix, back="rent"):
     chunk = pairs[page * PAGE:(page + 1) * PAGE]
@@ -308,26 +479,32 @@ def items_kb(pairs, page, nav_prefix, back="rent"):
     rows.append([B(text="⬅️ Категории", callback_data=back)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 @r.callback_query(F.data == "noop")
 async def noop(c: CallbackQuery):
     await c.answer()
+
 
 @r.callback_query(F.data.startswith("p:"))
 async def list_items(c: CallbackQuery):
     _, cat, page = c.data.split(":")
     pairs = [(cat, it) for it in ITEMS[cat]]
-    await show(c, f"<b>{CATS[cat]}</b>\nВыберите лот:", items_kb(pairs, int(page), f"p:{cat}"))
+    await show(c, f"<b>{CATS[cat]}</b>\nВыберите лот:", items_kb(pairs, int(page), f"p:{cat}"), img_cat(cat))
 
+
+# ---- поиск
 @r.callback_query(F.data == "search")
 async def search(c: CallbackQuery, state: FSMContext):
     await state.set_state(S.search)
     await show(c, "🔍 Введите название или часть названия.\nМожно категорию: <code>gift</code>, "
                   "<code>username</code>, <code>number</code>.", back_home())
 
+
 @r.message(S.search)
 async def do_search(m: Message, state: FSMContext):
     q = m.text.lower().strip().lstrip("@")
-    alias = {"gift": "g", "подар": "g", "nft": "g", "user": "u", "юзер": "u", "number": "n", "номер": "n"}
+    alias = {"gift": "g", "подар": "g", "nft": "g", "user": "u", "юзер": "u", "number": "n", "номер": "n",
+}
     forced = next((v for k, v in alias.items() if q.startswith(k)), None)
     found = [(c_, it) for c_ in ITEMS for it in ITEMS[c_] if forced == c_ or q in it["name"].lower()]
     if not found:
@@ -335,6 +512,8 @@ async def do_search(m: Message, state: FSMContext):
     await state.clear()
     await show(m, f"Найдено: {len(found)}", items_kb(found[:PAGE], 0, "noop", back="home"))
 
+
+# ---- лот
 @r.callback_query(F.data.startswith("i:"))
 async def item(c: CallbackQuery, state: FSMContext):
     _, cat, idx = c.data.split(":")
@@ -357,13 +536,16 @@ async def item(c: CallbackQuery, state: FSMContext):
                    f"\nЦвет: <b>{it.get('color') or '—'}</b>")
     text = (f"{ICON[cat]} <b>{it['name']}</b>{link}{details}\n"
             f"{price_line(it)}\n\nНа сколько вы хотите арендовать?")
-    await show(c, text, InlineKeyboardMarkup(inline_keyboard=rows))
+    await show(c, text, InlineKeyboardMarkup(inline_keyboard=rows),
+               it.get("img") or img_item(cat, it), lambda: img_item(cat, it))
+
 
 @r.callback_query(F.data == "dcustom")
 async def dcustom(c: CallbackQuery, state: FSMContext):
     await state.set_state(S.days)
     await c.message.answer("Введите количество дней числом (1–365):")
     await c.answer()
+
 
 @r.message(S.days)
 async def days_in(m: Message, state: FSMContext):
@@ -372,9 +554,11 @@ async def days_in(m: Message, state: FSMContext):
     await state.set_state(None)
     await rent_confirm(m, state, int(m.text))
 
+
 @r.callback_query(F.data.startswith("d:"))
 async def days_btn(c: CallbackQuery, state: FSMContext):
     await rent_confirm(c, state, int(c.data.split(":")[1]))
+
 
 async def rent_confirm(ev, state, days):
     d = await state.get_data()
@@ -386,17 +570,21 @@ async def rent_confirm(ev, state, days):
     await state.update_data(days=days, total=total, title=title)
     await show(ev, f"<b>{it['name']}</b>\nСрок: {days} дн.\nИтого: <b>{fmt(total)} TON</b>", confirm_kb())
 
+
 def confirm_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [B(text="✅ Подтвердить", callback_data="confirm")],
         [B(text="⬅️ Отмена", callback_data="home")]])
 
+
+# ---- Premium
 @r.callback_query(F.data == "prem")
 async def prem(c: CallbackQuery):
     rows = [[B(text=f"⭐ {m} мес. — {fmt(prem_price(m))} TON", callback_data=f"pm:{m}")] for m in PREMIUM_BASE]
     rows.append([B(text="⬅️ Назад", callback_data="home")])
     await show(c, "<b>Telegram Premium</b>\nОплата в TON. Подписка отправляется на ваш @username "
-                  "(как подарок через Fragment).", InlineKeyboardMarkup(inline_keyboard=rows))
+                  "(как подарок через Fragment).", InlineKeyboardMarkup(inline_keyboard=rows), img_premium())
+
 
 @r.callback_query(F.data.startswith("pm:"))
 async def prem_months(c: CallbackQuery, state: FSMContext):
@@ -408,14 +596,16 @@ async def prem_months(c: CallbackQuery, state: FSMContext):
     rows.append([B(text="⬅️ Назад", callback_data="prem")])
     await state.set_state(S.target)
     await show(c, f"<b>Premium {m} мес.</b> — {fmt(prem_price(m))} TON\n\nНапишите @username получателя "
-                  "или нажмите кнопку.", InlineKeyboardMarkup(inline_keyboard=rows))
+                  "или нажмите кнопку.", InlineKeyboardMarkup(inline_keyboard=rows), img_premium(m))
+
 
 @r.callback_query(F.data == "stars")
 async def stars(c: CallbackQuery):
     rows = [[B(text=f"🌟 {n} ⭐ — {fmt(stars_price(n))} TON", callback_data=f"sn:{n}")] for n in STARS_BASE]
     rows.append([B(text="⬅️ Назад", callback_data="home")])
     await show(c, "<b>Telegram Stars</b>\nОплата в TON. Звёзды отправляются на ваш @username.",
-               InlineKeyboardMarkup(inline_keyboard=rows))
+               InlineKeyboardMarkup(inline_keyboard=rows), img_stars())
+
 
 @r.callback_query(F.data.startswith("sn:"))
 async def stars_amount(c: CallbackQuery, state: FSMContext):
@@ -427,7 +617,8 @@ async def stars_amount(c: CallbackQuery, state: FSMContext):
     rows.append([B(text="⬅️ Назад", callback_data="stars")])
     await state.set_state(S.target)
     await show(c, f"<b>{n} ⭐</b> — {fmt(stars_price(n))} TON\n\nНапишите @username получателя "
-                  "или нажмите кнопку.", InlineKeyboardMarkup(inline_keyboard=rows))
+                  "или нажмите кнопку.", InlineKeyboardMarkup(inline_keyboard=rows), img_stars(n))
+
 
 async def prem_confirm(ev, state, target):
     d = await state.get_data()
@@ -439,9 +630,11 @@ async def prem_confirm(ev, state, target):
     await state.update_data(target=target, title=title)
     await show(ev, f"<b>{title}</b>\nИтого: <b>{fmt(d['total'])} TON</b>", confirm_kb())
 
+
 @r.callback_query(F.data == "pt:me")
 async def pt_me(c: CallbackQuery, state: FSMContext):
     await prem_confirm(c, state, c.from_user.username)
+
 
 @r.message(S.target)
 async def pt_text(m: Message, state: FSMContext):
@@ -450,6 +643,8 @@ async def pt_text(m: Message, state: FSMContext):
         return await m.answer("Некорректный @username. Попробуйте ещё раз.")
     await prem_confirm(m, state, t)
 
+
+# ---- оплата
 @r.callback_query(F.data == "confirm")
 async def confirm(c: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -457,12 +652,14 @@ async def confirm(c: CallbackQuery):
         [B(text="⬅️ Отмена", callback_data="home")]])
     await show(c, "Выберите способ оплаты:", kb)
 
+
 @r.callback_query(F.data == "ton")
 async def ton(c: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [B(text="✅ Согласен", callback_data="agree")],
         [B(text="⬅️ Отмена", callback_data="home")]])
     await show(c, "Нажимая кнопку, вас перебросит в приложение Tonkeeper.\n\nВы согласны?", kb)
+
 
 @r.callback_query(F.data == "agree")
 async def agree(c: CallbackQuery, state: FSMContext):
@@ -488,12 +685,14 @@ async def agree(c: CallbackQuery, state: FSMContext):
     await show(c, f"Заказ <code>{oid}</code>\n{d['title']}\nСумма: <b>{fmt(d['total'])} TON</b>\n\n"
                   f"Оплатите, добавив комментарий к переводу: <code>{comment}</code>, затем нажмите «Я оплатил».", kb)
 
+
 async def notify_admins(bot, text, reply_markup=None):
     for a in ADMIN_IDS:
         try:
             await bot.send_message(a, text, reply_markup=reply_markup)
         except Exception:
             pass
+
 
 async def check_payment(oid, total):
     url = f"https://toncenter.com/api/v2/getTransactions?address={WALLET}&limit=50"
@@ -505,6 +704,7 @@ async def check_payment(oid, total):
         if f"rent_{oid}" in (im.get("message") or "") and int(im.get("value", 0)) >= int(total * 1e9) - 1000:
             return True
     return False
+
 
 @r.callback_query(F.data.startswith("chk:"))
 async def chk(c: CallbackQuery, bot: Bot):
@@ -539,6 +739,8 @@ async def chk(c: CallbackQuery, bot: Bot):
     await notify_admins(bot, f"💰 Заказ #{oid}\n{o['title']}\n{fmt(o['total'])} TON\n"
                                      f"Клиент: {who}\n\n{todo}", reply_markup=kb)
 
+
+# ---- мои заказы
 @r.callback_query(F.data == "my")
 async def my(c: CallbackQuery):
     mine = [(k, o) for k, o in ORDERS.items() if o["user"] == c.from_user.id and o["paid"]]
@@ -553,6 +755,8 @@ async def my(c: CallbackQuery):
         lines.append(f"<code>{k}</code> {o['title']} — {st}{extra}")
     await show(c, "<b>Ваши заказы</b>\n\n" + "\n".join(lines), back_home())
 
+
+# ---- админ
 @r.callback_query(F.data.startswith("adm_ok:"))
 async def adm_ok(c: CallbackQuery, bot: Bot):
     if c.from_user.id not in ADMIN_IDS:
@@ -569,6 +773,7 @@ async def adm_ok(c: CallbackQuery, bot: Bot):
     except Exception:
         pass
 
+
 @r.callback_query(F.data.startswith("adm_ret:"))
 async def adm_ret(c: CallbackQuery):
     if c.from_user.id not in ADMIN_IDS:
@@ -579,6 +784,7 @@ async def adm_ret(c: CallbackQuery):
         del RENTED[o["name"]]
         save_state()
     await c.message.edit_text(c.message.text + "\n\n↩️ Лот освобождён")
+
 
 @r.message(Command("orders"))
 async def orders_cmd(m: Message):
@@ -594,6 +800,7 @@ async def orders_cmd(m: Message):
                    f"В аренде:\n{busy}\n\nПоследние:\n{last}")
 
 
+# ---- напоминания об окончании аренды
 async def expiry_loop(bot: Bot):
     while True:
         try:
@@ -606,7 +813,7 @@ async def expiry_loop(bot: Bot):
                     kb = InlineKeyboardMarkup(inline_keyboard=[
                         [B(text="↩️ Вернули — освободить лот", callback_data=f"adm_ret:{v['order']}")]])
                     await notify_admins(bot, f"⏰ Аренда «{name}» закончилась (заказ #{v['order']}). "
-                                             f"Заберите актив.", reply_markup=kb)
+                                                     f"Заберите актив.", reply_markup=kb)
                     if o.get("user"):
                         try:
                             await bot.send_message(o["user"], f"⏰ Срок аренды «{name}» истёк. "
@@ -614,49 +821,50 @@ async def expiry_loop(bot: Bot):
                         except Exception:
                             pass
         except Exception:
-            logging.exception("expiry_loop")
+            pass
         await asyncio.sleep(60)
 
 
-# ============ ЭКСПОРТ ДЛЯ FLASK ============
-_bot: Bot = None
-_dp: Dispatcher = None
-_loop: asyncio.AbstractEventLoop = None
+# ---- Веб-обёртка для Render / gunicorn ----
+# Бот работает в фоне (polling), а веб-сервер отвечает на /health, чтобы Render видел сервис живым.
 
-WEBHOOK_URL = "https://app-1-9889.onrender.com"
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_SECRET = "mysecret123"
+from aiohttp import web
 
-def init_bot_and_loop() -> None:
-    global _bot, _dp, _loop
-    if _bot is not None:
-        return
 
+async def health(request):
+    return web.Response(text="ok")
+
+
+async def _start_bot(app):
     load_db()
     load_state()
-
-    _loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_loop)
-
-    _bot = Bot(BOT_TOKEN)
-    _dp = Dispatcher(storage=MemoryStorage())
-    _dp.include_router(r)
-    _loop.create_task(expiry_loop(_bot))
-
-    async def _set_webhook():
-        await _bot.set_webhook(
-            f"{WEBHOOK_URL}{WEBHOOK_PATH}",
-            secret_token=WEBHOOK_SECRET,
-            drop_pending_updates=True,
-        )
-        logging.info("Webhook successfully set to %s%s", WEBHOOK_URL, WEBHOOK_PATH)
-    
-    _loop.run_until_complete(_set_webhook())
-
-    threading.Thread(target=_loop.run_forever, daemon=True, name="aiogram-loop").start()
-    logging.info("Bot initialized, event loop started")
+    bot = Bot(BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(r)
+    app["bot"] = bot
+    app["tasks"] = [
+        asyncio.create_task(expiry_loop(bot)),
+        asyncio.create_task(dp.start_polling(bot, handle_signals=False)),
+    ]
 
 
-async def process_update(update_data: dict) -> None:
-    update = Update.model_validate(update_data, context={"bot": _bot})
-    await _dp.feed_update(_bot, update)
+async def _stop_bot(app):
+    for t in app.get("tasks", []):
+        t.cancel()
+    if "bot" in app:
+        await app["bot"].session.close()
+
+
+def make_app():
+    web_app = web.Application()
+    web_app.router.add_get("/", health)
+    web_app.router.add_get("/health", health)
+    web_app.on_startup.append(_start_bot)
+    web_app.on_cleanup.append(_stop_bot)
+    return web_app
+
+
+app = make_app()
+
+if __name__ == "__main__":
+    web.run_app(app, port=int(os.environ.get("PORT", 8080)))
