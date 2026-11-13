@@ -2,7 +2,7 @@
 Бот аренды Telegram-активов + покупка Telegram Premium за TON.
 Логика бота. Экспортирует init_bot_and_loop() для app.py (Flask).
 """
-import asyncio, os, io, json, time, secrets, random, zlib, threading, logging  # === НОВОЕ: threading, logging ===
+import asyncio, os, io, json, time, secrets, random, zlib, threading, logging
 from urllib.parse import quote
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -12,12 +12,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
-                           InlineKeyboardButton as B, BufferedInputFile, Update)  # === НОВОЕ: Update ===
+                           InlineKeyboardButton as B, BufferedInputFile, Update)
 
 # ============ НАСТРОЙКИ ============
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "8708165470,8586156220").split(",") if x.strip()]
-WALLET    = os.getenv("WALLET", "UQCEI8wLYKGYmARvvyWKc_QGhYu5nVbT3UrqipjVGrZxVCdQ")
+# Токен и ID вписаны напрямую!
+BOT_TOKEN = "9224533616:AAE_ArqfdWu_gGoAhWMZ2iaa9Z07zTIm9-U"
+ADMIN_IDS = [8708165470, 8586156220]
+
+WALLET    = "UQCEI8wLYKGYmARvvyWKc_QGhYu5nVbT3UrqipjVGrZxVCdQ"
 DAY_RATE = 0.08
 MIN_DAY_PRICE = 0.1
 NUMBER_TIERS = {1: 6.0, 7: 20.0, 30: 50.0, 365: 400.0}
@@ -763,8 +765,6 @@ def init_bot_and_loop(webhook_url: str = "", webhook_path: str = "/webhook",
     global _bot, _dp, _loop
     if _bot is not None:
         return
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is not set")
 
     load_db()
     load_state()
